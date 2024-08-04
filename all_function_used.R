@@ -1,6 +1,5 @@
 ##get all detected PRF period 
-extract_sequences <- function(mrna_file) {
-  mrna_data <- read_excel(mrna_file)
+extract_sequences <- function(mrna_data) {
   mrna_data <- na.omit(mrna_data)  
   mrna_data$FS_start <- as.numeric(mrna_data$FS_start)
   mrna_data$FS_end <- as.numeric(mrna_data$FS_end)
@@ -44,7 +43,6 @@ set_data_frame <- function(x){
 #base on data to get first six strings and order it (data should at least contain cols named String and Frequence )
 first_six <-function(data){
   first_six$String <- substr(data$String, start = 1, stop = 6)
-
   first_six <- first_six %>%
     group_by(String) %>%
     summarise(Sum = sum(Frequency))
@@ -53,68 +51,262 @@ first_six <-function(data){
 #---------------------------------------------------------------------------------------------------------
 #base on DNA_seqid to get matched mRNA sequences(when using the blastx data should conain DNA_seqid and the 
 #sequence database named all_mrna)
-mrna_seq <- function(blastx){
+mrna_seq <- function(blastx,all_mrna){
   blastx <- blastx %>%
     mutate(Sequence = all_mrna$Sequence[match(DNA_seqid,all_mrna$DNA_seqid)])
   return(blastx)
 }
+library(dplyr)
+
+test <- function(data, prf, col_match = 'DNA_seqid', get = 'PRF') {
+  get_col <- sym(get)
+  match_col <- sym(col_match)
+  data <- data %>%
+    mutate(!!get := prf[[get]][match(data[[col_match]], prf[[col_match]])])
+  
+  return(data)
+}
+
 #-------------------------------------------------------------------------------------------------
-#Smith-Waterman 算法打分
-SW <- function(x1,x2){
-  W1 <- 2
-  H <- matrix(0, nrow = length(x2) + 1, ncol = length(x1) + 1)
-  for (i in 2:(length(x2) + 1)) {
-    for (j in 2:(length(x1) + 1)) {
-      s <- ifelse(x1[j-1] == x2[i-1], 3, -3)
-      a <- H[i-1, j-1] + s
-      H[i, j] <- max(c(a, H[i-1, j] - W1, H[i, j-1] - W1, 0))
-    }
+library(Biostrings)
+
+match_score=2
+mismatch_score=-1
+gap_open=-1
+gap_extend=-2
+
+
+score_seq <- function(df, standard = 'AAATAA', match_score = 1, mismatch_score = -2, gap_open = -2, gap_extend = -2){
+# 定义比对函数，并传递所有必要的参数
+  align_seq <- function(seq1, standard = 'AAATAA', match_score = 1, mismatch_score = -2, gap_open = -2, gap_extend = -2) {
+    # 定义替换矩阵
+    nucleotide_subs_matrix <- matrix(
+      c(match_score, mismatch_score, mismatch_score, mismatch_score,
+        mismatch_score, match_score, mismatch_score, mismatch_score,
+        mismatch_score, mismatch_score, match_score, mismatch_score,
+        mismatch_score, mismatch_score, mismatch_score, match_score),
+      nrow = 4, dimnames = list(c("A", "C", "G", "T"), c("A", "C", "G", "T"))
+    )
+  
+  # 执行比对
+    alignment <- pairwiseAlignment(
+      seq1, standard, 
+      type = "local", 
+      substitutionMatrix = nucleotide_subs_matrix, 
+      gapOpening = gap_open, 
+      gapExtension = gap_extend
+    )
+  
+  # 返回比对结果
+    result <- list(
+      score = score(alignment),
+      pattern = as.character(aligned(pattern(alignment))),
+      subject = as.character(aligned(subject(alignment))),
+      start_pattern = start(pattern(alignment)),
+      end_pattern = end(pattern(alignment)),
+      start_subject = start(subject(alignment)),
+      end_subject = end(subject(alignment))
+    )
+    return(result)
   }
-  max_H <- max(H)
-  n1 <- which(H == max_H, arr.ind = TRUE)[1]
-  m1 <- which(H == max_H, arr.ind = TRUE)[2]
-  n <- numeric()
-  m <- numeric()
-  n <- c(n, n1)
-  m <- c(m, m1)
-  i <- 1
-  while (!( n1 == 1 || m1 == 1 )) {
-    if (x1[m1-1] == x2[n1-1]) {
-      n <- c(n, n1 - 1)
-      m <- c(m, m1 - 1)
+
+# 使用sapply对数据框的FS_Period列进行比对
+  alignment_results <- sapply(df$FS_Period, align_seq, standard = "AAATAA", match_score = 2, mismatch_score = -1, gap_open = -1, gap_extend = -2, simplify = FALSE)
+
+# 提取比对结果并添加到数据框
+  df$Alignment_Score <- sapply(alignment_results, function(x) x$score)
+  df$Aligned_Pattern <- sapply(alignment_results, function(x) x$pattern)
+  df$Aligned_Subject <- sapply(alignment_results, function(x) x$subject)
+  df$Pattern_Start <- sapply(alignment_results, function(x) x$start_pattern)
+  df$Pattern_End <- sapply(alignment_results, function(x) x$end_pattern)
+  df$Subject_Start <- sapply(alignment_results, function(x) x$start_subject)
+  df$Subject_End <- sapply(alignment_results, function(x) x$end_subject)
+  
+  return(df)
+}
+
+x2_list <- c('AAATAA', 'AAATAG')
+#-------------------------------------------------------------------------------------------------------------------
+mergeByMax <- function(a, b) {
+  
+  # 初始化一个空数据框用于存储最大分数的行
+  max_score <- data.frame()
+  
+  # 遍历数据框的每一行
+  for (i in 1:nrow(a)) {
+    # 比较两个数据框中相同行的 Alignment_Score 值
+    if (a$Alignment_Score[i] >= b$Alignment_Score[i]) {
+      # 如果 a 中的分数较大或相等，添加 a 中的行
+      max_score <- rbind(max_score, a[i, , drop = FALSE])
     } else {
-      a <- H[n1-1, m1-1]
-      if (a < H[n1, m1-1] && H[n1, m1-1] >= H[n1-1, m1]) {
-        n <- c(n, n1)
-        m <- c(m, m1 - 1)
-      } else if (H[n1-1, m1] > a && H[n1-1, m1] > H[n1, m1-1]) {
-        n <- c(n, n1 - 1)
-        m <- c(m, m1)
-      } else {
-        n <- c(n, n1 - 1)
-        m <- c(m, m1 - 1)
-      }
+      # 否则，添加 b 中的行
+      max_score <- rbind(max_score, b[i, , drop = FALSE])
     }
-    i <- i + 1
-    n1 <- n[i]
-    m1 <- m[i]
   }
   
-  n <- rev(n[-1])
-  m <- rev(m[-1])
+  # 返回合并后的数据框
+  return(max_score)
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+library(Biostrings)
+library(dplyr)
+
+score_frameshift_mutation <- function(blast_df, mrna_sequences,all_prf_data) {
+  blast_df <- test(blast_df,all_blastx,col_match = 'DNA_seqid' ,get = 'pident')
+  blast_df <- test(blast_df,all_blastx,col_match = 'DNA_seqid' ,get = 'bitscore')
+  blast_df <- test(blast_df,all_blastx,col_match = 'DNA_seqid' ,get = 'evalue')
+  blast_df<- mrna_seq(blast_df,mrna_sequences)
+  blast_df$FS_Period <- extract_sequences(blast_df)
+  # 1. 计算两段序列的同源性得分
+  blast_df$homology_score <- with(blast_df, {
+    evalue_score <- -log10(evalue + 1e-10)
+    homology_score <- (pident / 100) * bitscore * evalue_score
+    return(homology_score)
+  })
   
-  A <- character()
-  B <- character()
-  for (i in 1:length(n)) {
-    if (H[n[i], m[i]] == 0) {
-      A <- c(A, "")
-      B <- c(B, "")
-    } else {
-      A <- c(A, x1[m[i]])
-      B <- c(B, x2[n[i]])
-      if (i < length(n) && n[i+1] == n[i]) B[i] <- "_"
-      if (i < length(n) && m[i+1] == m[i]) A[i] <- "_"
-    }
+  # 2. 计算间隔距离得分
+  blast_df$distance_score <- with(blast_df, {
+    mean_distance <- 8.5  # 假设最有可能发生移码的平均距离
+    sigma <- 1.5  # 标准差
+    distance <- abs(FS_end - FS_start)
+    distance_score <- dnorm(distance, mean = mean_distance, sd = sigma)
+    distance_score <- -log10(distance_score + 1e-10)
+    return(distance_score)
+  })
+  
+  # 3. 计算序列模式匹配得分，同时保留alignment信息
+  align_seq <- function(seq1, standard = 'AAATAA', match_score = 1, mismatch_score = -2, gap_open = -2, gap_extend = -2) {
+    nucleotide_subs_matrix <- matrix(
+      c(match_score, mismatch_score, mismatch_score, mismatch_score,
+        mismatch_score, match_score, mismatch_score, mismatch_score,
+        mismatch_score, mismatch_score, match_score, mismatch_score,
+        mismatch_score, mismatch_score, mismatch_score, match_score),
+      nrow = 4, dimnames = list(c("A", "C", "G", "T"), c("A", "C", "G", "T"))
+    )
+    
+    alignment <- pairwiseAlignment(
+      seq1, standard, 
+      type = "local", 
+      substitutionMatrix = nucleotide_subs_matrix, 
+      gapOpening = gap_open, 
+      gapExtension = gap_extend
+    )
+    
+    result <- list(
+      score = score(alignment),
+      pattern = as.character(aligned(pattern(alignment))),
+      subject = as.character(aligned(subject(alignment))),
+      start_pattern = start(pattern(alignment)),
+      end_pattern = end(pattern(alignment)),
+      start_subject = start(subject(alignment)),
+      end_subject = end(subject(alignment))
+    )
+    return(result)
   }
-  return()
+  
+  score_seq <- function(df, standard = 'AAATAA', match_score = 1, mismatch_score = -2, gap_open = -2, gap_extend = -2) {
+    alignment_results <- sapply(df$FS_Period, align_seq, 
+                                standard = standard, 
+                                match_score = match_score, 
+                                mismatch_score = mismatch_score, 
+                                gap_open = gap_open, 
+                                gap_extend = gap_extend, simplify = FALSE)
+    
+    df$Alignment_Score <- sapply(alignment_results, function(x) x$score)
+    df$Aligned_Pattern <- sapply(alignment_results, function(x) x$pattern)
+    df$Aligned_Subject <- sapply(alignment_results, function(x) x$subject)
+    df$Pattern_Start <- sapply(alignment_results, function(x) x$start_pattern)
+    df$Pattern_End <- sapply(alignment_results, function(x) x$end_pattern)
+    df$Subject_Start <- sapply(alignment_results, function(x) x$start_subject)
+    df$Subject_End <- sapply(alignment_results, function(x) x$end_subject)
+    
+    return(df)
+  }
+  
+  df1 <- score_seq(blast_df, 'AAATAA', 1, -2, -2, -2)
+  df2 <- score_seq(blast_df, 'AAATAG', 1, -2, -2, -2)
+  
+  df <- bind_rows(df1, df2) %>%
+    group_by(DNA_seqid) %>%
+    slice_max(order_by = Alignment_Score, n = 1) %>%
+    ungroup()
+  
+  df <- test(df, all_prf_data)
+  df$total_score <- with(df, {
+    total_score <- homology_score * distance_score * (1 + Alignment_Score)
+    return(total_score)
+  })
+  return(df)
+}
+
+#-------------------------------------------------------------------------------------------------------------------
+library(ggplot2)
+library(pROC)
+library(coin)
+evaluate_scores <- function(df, total_score_col, low=0.30, high=0.80) {
+  
+  # 提取 PRF 和非 PRF 分数
+  PRF_score <- df[[total_score_col]][df$PRF == FALSE]
+  nPRF_score <- df[[total_score_col]][df$PRF == TRUE]
+  
+  threshold_low <- quantile(PRF_score, low)
+  threshold_high <- quantile(PRF_score, high)
+  # t-test
+  t_test_result <- t.test(PRF_score, nPRF_score)
+  print(t_test_result)
+  
+  # Mann-Whitney U 检验
+  wilcox_test_result <- wilcox.test(PRF_score, nPRF_score)
+  print(wilcox_test_result)
+  
+  # 计算 AUC 值
+  labels <- ifelse(df$PRF == FALSE, 1, 0)
+  roc_obj <- roc(labels, df[[total_score_col]])
+  plot(roc_obj)
+  auc_value <- auc(roc_obj)
+  print(auc_value)
+  # 分类数据
+  df$Category_Pred <- cut(
+    df[[total_score_col]],
+    breaks = c(-Inf, threshold_low, threshold_high, Inf),
+    labels = c("Low Probability A", "Possible A", "High Probability A")
+  )
+  
+  # 计算混淆矩阵
+  confusion_matrix <- table(Predicted = df$Category_Pred, Actual = df$PRF)
+  print(confusion_matrix)
+  
+  # 计算准确率
+  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  print(paste("Accuracy:", accuracy))
+  
+  # 计算精确度
+  precision <- confusion_matrix["High Probability A", "TRUE"] / 
+    (confusion_matrix["High Probability A", "TRUE"] + confusion_matrix["High Probability A", "FALSE"])
+  print(paste("Precision:", precision))
+  
+  # 计算假阳性率
+  false_positive_rate <- confusion_matrix["High Probability A", "FALSE"] / 
+    (confusion_matrix["High Probability A", "FALSE"] + confusion_matrix["Low Probability A", "FALSE"])
+  print(paste("False Positive Rate:", false_positive_rate))
+  
+  # 计算假阴性率
+  false_negative_rate <- confusion_matrix["Low Probability A", "TRUE"] / 
+    (confusion_matrix["Low Probability A", "TRUE"] + confusion_matrix["High Probability A", "TRUE"])
+  print(paste("False Negative Rate:", false_negative_rate))
+  
+  # 计算召回率
+  recall <- confusion_matrix["High Probability A", "TRUE"] / 
+    (confusion_matrix["High Probability A", "TRUE"] + confusion_matrix["Low Probability A", "TRUE"])
+  print(paste("Recall:", recall))
+  
+  #df$PRF <- as.factor(df$PRF)
+  #Permutation Test
+  #perm_test_result <- independence_test(PRF ~ total_score, data = df)
+  #print(paste('Permutation Test:',perm_test_result))
+  
+  #Spearman Rank Correlation:
+  spearman_correlation <- cor(df[[total_score_col]], as.numeric(df$PRF), method = "spearman")
+  print(paste('Spearman Rank Correlation:',spearman_correlation))
 }
